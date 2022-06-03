@@ -53,8 +53,7 @@ fi
 # Iterate throught the matching PIDs, output the corresponding line from the error log with the corresponding block from the slow log.
 while IFS= read -r line; do
   grep $SEARCHDATE.\*child\ $line\ .\*SIGKILL "$PHP_FPM_ERROR_LOG"
-  sed -n "/$SEARCHDATE.*pid $line/,/^$/p" "$PHP_SLOW_LOG"
-  #sed -n "/`date +"%d-%b-%Y"`.*pid $line/,/^$/p" "$PHP_SLOW_LOG"
+  sed -n "/$SEARCHDATE.*pid $line$/,/^$/p" "$PHP_SLOW_LOG"
 done <<EOF
 $SLOWKILLED
 EOF
