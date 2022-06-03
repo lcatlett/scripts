@@ -33,10 +33,9 @@ if [ "$3" ]; then
   PHP_SLOW_LOG="$3"
 fi
 
-if [[ ! -f $PHP_FPM_ERROR_LOG ]] && [[ ! -f PHP_SLOW_LOG ]]
-then
+if [[ ! -f $PHP_FPM_ERROR_LOG ]] && [[ ! -f PHP_SLOW_LOG ]]; then
   echo "No php-fpm error logs or php-slow logs found."
-  echo "Check that you are running the script from the correct location or modify the PHP_FPM_ERROR_LOG and PHP_SLOW_LOG variables to point to the log files."
+  echo "Check that you are running the script from the correct location or specify the path to your log files."
   exit
 fi
 
@@ -46,8 +45,7 @@ SLOW=`grep $SEARCHDATE.\*pool\ www "$PHP_SLOW_LOG" | awk '{print $6}' | sort`
 SLOWKILLED=`comm -1 -2 <(echo "$KILLED") <(echo "$SLOW")`
 
 # Exit if there are no killed PIDs, otherwise it will spit out the entire slow log.
-if [ -z "$SLOWKILLED" ]
-then
+if [ -z "$SLOWKILLED" ]; then
   echo "No matches."
   exit
 fi
