@@ -1,64 +1,84 @@
 #!/bin/bash
 
-# This script outputs the sections of the php-slow log that match PIDs of php-fpm processes that were killed.
-# The goal is to help identify slow php processes that may be causing 50x errors.
-# The script only looks for matches on one date (today's date if no parameters are provided) to limit the output and hopefully prevent mismatching on reused PIDs.
-#
+# Original script by Kirk https://github.com/kirrrk/scripts/blob/main/slowkills.sh
+# Modified script to work on multiple containers Carey https://github.com/careydayrit/locum
+# environment is live server
+
 # USAGE:
-#  slowkills.sh [DATE] [ERROR LOG] [SLOW LOG]
-#
-# EXAMPLES:
-#  slowkills.sh
-#  slowkills.sh 01-Jun-2022
-#  slowkills.sh 02-Jun-2022 logs/php/php-fpm-error.log logs/php/php-slow.log
+# ./site-slow-kills.sh <site_id>
 
-SEARCHDATE=`date +"%d-%b-%Y"`
-PHP_FPM_ERROR_LOG=php-fpm-error.log
-PHP_SLOW_LOG=php-slow.log
+# Exit on error
+set -e
 
-if [ "$1" ]; then
-  UNAME=$(uname)
-  if [[ "$UNAME" == "Linux" ]]; then 
-    SEARCHDATE=`date -d "$1" +"%d-%b-%Y"`
-  else
-    SEARCHDATE="$1"
-  fi
+export LC_ALL=en_US.UTF-8
+export LANG=en_US.UTF-8
+
+if [ -z "$1" ]; then
+    echo "Site ID empty"
+    exit
 fi
 
-if [ "$2" ]; then
-  PHP_FPM_ERROR_LOG="$2"
+CHECKSITE_ID=$(echo $1 | grep '^[a-zA-Z0-9]\{8\}[ -][a-zA-Z0-9]\{4\}[ -][a-zA-Z0-9]\{4\}[ -][a-zA-Z0-9]\{4\}[ -][a-zA-Z0-9]\{12\}$')
+
+if [ -z ${CHECKSITE_ID} ]; then
+	echo "Site ID invalid"
+	exit 1
 fi
 
-if [ "$3" ]; then
-  PHP_SLOW_LOG="$3"
+if [[ ! -d reports ]]; then
+	mkdir reports
 fi
 
-if [[ ! -f $PHP_FPM_ERROR_LOG ]] && [[ ! -f PHP_SLOW_LOG ]]; then
-  echo "No php-fpm error logs or php-slow logs found."
-  echo "Check that you are running the script from the correct location or specify the path to your log files."
-  exit
+# Fetch the username on ~/.ssh/config
+USERNAME="`ssh -G yggdrasil.us-central1.panth.io | grep 'user ' | awk -F' ' '{ print $2 }' | xargs`"
+
+# make the search date as the server time (UTC)
+SEARCHDATE=`date -u +"%d-%b-%Y"`
+
+# check if there is jq
+if ! [ -x "$(command -v jq)" ]; then
+	echo 'Error: The jq command was not found. Please install it yourself and try again.' >&2
+	exit 1
 fi
 
-# Get list of killed PIDs, slow PIDs, and compare them.
-KILLED=`grep $SEARCHDATE.\*SIGKILL "$PHP_FPM_ERROR_LOG" | awk '{print $7}' | sort`
-SLOW=`grep $SEARCHDATE.\*pool\ www "$PHP_SLOW_LOG" | awk '{print $6}' | sort`
-SLOWKILLED=`comm -1 -2 <(echo "$KILLED") <(echo "$SLOW")`
+# site data binding and conneciton info
+ssh $USERNAME@`dig +short yggdrasil.us-central1.panth.io | tail -1` "/usr/local/bin/ygg sites/$1/bindings  --silent" > ./reports/$1.bindings.json
 
-# Exit if there are no killed PIDs, otherwise it will spit out the entire slow log.
-if [ -z "$SLOWKILLED" ]; then
-  echo "No matches."
-  exit
-fi
+# produce this string
+while read -r value; do
+	servers+=("$value")	
+done < <(cat ./reports/$1.bindings.json | jq -r '.[] | select(.environment=="live") | select(.type=="appserver") | select(.failover!=true) | "" + .host + " " + .id' )
 
-# Iterate throught the matching PIDs, output the corresponding line from the error log with the corresponding block from the slow log.
-while IFS= read -r line; do
-  grep $SEARCHDATE.\*child\ $line\ .\*SIGKILL "$PHP_FPM_ERROR_LOG"
-  sed -n "/$SEARCHDATE.*pid $line$/,/^$/p" "$PHP_SLOW_LOG"
-done <<EOF
+echo "Downloading logs"
+
+# fetch data
+for server in "${servers[@]}"; do
+	info=($server)
+	ssh-keyscan -p 2225 -H "${info[0]}" >> ~/.ssh/known_hosts
+	rsync -rlvz --size-only --ipv4 --progress -e "ssh -p 2225" "${USERNAME}@${info[0]}:/srv/bindings/${info[1]}/logs/php" "./reports/app_server_${info[1]}"		
+done
+clear
+for server in "${servers[@]}"; do
+	info=($server)
+	KILLED=`grep $SEARCHDATE.\*SIGKILL "./reports/app_server_${info[1]}/php/php-fpm-error.log" | awk '{print $7}' | sort`
+	SLOW=`grep $SEARCHDATE.\*pool\ www "./reports/app_server_${info[1]}/php/php-slow.log" | awk '{print $6}' | sort`
+	SLOWKILLED=`comm -1 -2 <(echo "$KILLED") <(echo "$SLOW")`
+	echo "App Server ${info[0]}"
+	if [ -z "$SLOWKILLED" ]; then
+		echo "No matches."
+		echo  
+		continue
+	fi
+	
+	# Iterate throught the matching PIDs, output the corresponding line from the error log with the corresponding block from the slow log.
+	while IFS= read -r line; do
+		grep $SEARCHDATE.\*child\ $line\ .\*SIGKILL "./reports/app_server_${info[1]}/php/php-fpm-error.log"
+		sed -n "/$SEARCHDATE.*pid $line$/,/^$/p" "./reports/app_server_${info[1]}/php/php-slow.log"
+	done <<EOF
 $SLOWKILLED
 EOF
-
-echo 
-echo `comm -1 -2 <(echo "$KILLED") <(echo "$SLOW") | wc -l` matches found.
-echo `diff -u <(echo "$KILLED") <(echo "$SLOW") | grep '^-[^-]' | wc -l` killed processes did not match PIDs found in the php-slow logs.
-
+	echo 
+	echo `comm -1 -2 <(echo "$KILLED") <(echo "$SLOW") | wc -l` matches found.
+	echo `diff -u <(echo "$KILLED") <(echo "$SLOW") | grep '^-[^-]' | wc -l` killed processes did not match PIDs found in the php-slow logs.
+	echo
+done
