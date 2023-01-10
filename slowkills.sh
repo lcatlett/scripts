@@ -47,7 +47,7 @@ ssh $USERNAME@`dig +short yggdrasil.us-central1.panth.io | tail -1` "/usr/local/
 # produce this string
 while read -r value; do
 	servers+=("$value")	
-done < <(cat ./reports/$1.bindings.json | jq -r '.[] | select(.environment=="live") | select(.type=="appserver") | select(.failover!=true) | "" + .host + " " + .id' )
+done < <(cmd file | ./reports/"$1".bindings.json | jq -r '.[] | select(.environment=="live") | select(.type=="appserver") | select(.failover!=true) | "" + .host + " " + .id' )
 
 echo "Downloading logs"
 
